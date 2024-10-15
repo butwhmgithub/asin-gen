@@ -1,0 +1,137 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for Lambda function with API Gateway'
+
+Resources:
+  ASINGeneratorLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: asin-generator
+      Handler: asin-gen.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.8
+      Code:
+        ZipFile: |
+          import sys
+          from awsglue.transforms import *
+          from awsglue.utils import getResolvedOptions
+          from pyspark.context import SparkContext
+          from awsglue.context import GlueContext
+          from awsglue.job import Job
+          import gs_concat
+
+          def lambda_handler(event, context):
+              args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+              sc = SparkContext()
+              glueContext = GlueContext(sc)
+              spark = glueContext.spark_session
+              job = Job(glueContext)
+              job.init(args['JOB_NAME'], args)
+
+              # Script generated for node Amazon S3-input
+              AmazonS3input_node1729006813968 = glueContext.create_dynamic_frame.from_options(
+                  format_options={"quoteChar": "\"", "withHeader": True, "separator": ","},
+                  connection_type="s3",
+                  format="csv",
+                  connection_options={"paths": ["s3://glue-demo-trathy-2"], "recurse": True},
+                  transformation_ctx="AmazonS3input_node1729006813968"
+              )
+
+              # Script generated for node Concatenate Columns
+              ConcatenateColumns_node1729006828371 = AmazonS3input_node1729006813968.gs_concat(
+                  colName="ASIN", colList=["item id", "upc"]
+              )
+
+              # Script generated for node Amazon S3-output
+              AmazonS3output_node1729008538626 = glueContext.write_dynamic_frame.from_options(
+                  frame=ConcatenateColumns_node1729006828371,
+                  connection_type="s3",
+                  format="csv",
+                  connection_options={"path": "s3://glue-demo-trathy-2/output/", "partitionKeys": []},
+                  transformation_ctx="AmazonS3output_node1729008538626"
+              )
+
+              job.commit()
+              
+              return {
+                  'statusCode': 200,
+                  'body': 'ASIN generation complete'
+              }
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3AccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: 
+                  - arn:aws:s3:::glue-demo-trathy-2/*
+        - PolicyName: GlueAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:*
+                Resource: '*'
+
+  ASINGeneratorAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: ASIN Generator API
+      Description: API for generating ASINs
+
+  ASINGeneratorResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ASINGeneratorAPI
+      ParentId: !GetAtt ASINGeneratorAPI.RootResourceId
+      PathPart: get-asin
+
+  ASINGeneratorMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ASINGeneratorAPI
+      ResourceId: !Ref ASINGeneratorResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 
+          - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+          - LambdaArn: !GetAtt ASINGeneratorLambdaFunction.Arn
+
+  ASINGeneratorDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: ASINGeneratorMethod
+    Properties:
+      RestApiId: !Ref ASINGeneratorAPI
+      StageName: prod
+
+  LambdaApiGatewayInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt ASINGeneratorLambdaFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ASINGeneratorAPI}/*/GET/get-asin
+
+Outputs:
+  APIGatewayEndpoint:
+    Description: API Gateway Endpoint
+    Value: !Sub https://${ASINGeneratorAPI}.execute-api.${AWS::Region}.amazonaws.com/prod/get-asin
